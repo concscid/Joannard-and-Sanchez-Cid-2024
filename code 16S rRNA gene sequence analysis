@@ -1,0 +1,175 @@
+####DADA2 for 16S sequence treatment
+
+library(dada2)
+
+path <- "/microplastics/16S"
+database <- "/databases/rdp_train_set_18.fa.gz"
+
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+# Place filtered files in filtered/ subdirectory
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, trimLeft=c(19,20), truncLen=c(240,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+write.table(out, "trimming.txt")
+
+### Dereplication
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+
+
+###DADA algorithm
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+### Sample Inference
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+
+####Merging
+
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+
+###Create ASV table
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+slen<-table(nchar(getSequences(seqtab)))
+write.table(slen, "sequencelength.txt")
+
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% 200:300]
+
+####Remove chimeras
+
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+
+###Know how many reads made it through all the steps
+
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+write.table(track, "stats.txt")
+
+## Give Seq headers more manageable names
+asv_seqs <- colnames(seqtab.nochim)
+asv_headers <- vector(dim(seqtab.nochim)[2], mode="character")
+for (i in 1:dim(seqtab.nochim)[2]) {
+  asv_headers[i] <- paste(">ASV", i, sep="_")
+}
+
+## Make and writing out a fasta of the final ASV seqs
+asv_fasta <- c(rbind(asv_headers, asv_seqs))
+write(asv_fasta, "out_ASVs.fa")
+
+## ASV count table 
+asv_tab <- t(seqtab.nochim)
+row.names(asv_tab) <- sub(">", "", asv_headers)
+write.table(asv_tab, "out_ASVs_counts.tsv", sep="\t", quote=F, col.names=NA)
+
+### Assign taxonomy - Bayesian classifier
+taxa <- assignTaxonomy(seqtab.nochim, database, multithread=TRUE)
+row.names(taxa) <- sub(">", "", asv_headers)
+write.table(taxa, file = "out_taxa.txt", append = FALSE, quote = TRUE, sep = "\t")
+
+################################################################################################
+
+########16S rRNA gene sequence analysis (after sequence treatment using DADA2)#####
+########All the steps are done using R
+
+####Step 1: clean-up output from DADA2 using Phyloseq
+
+library(phyloseq)
+##Create phyloseq object
+otumat<-read.table("out_ASVs_counts.tsv", header=TRUE)
+taxmat<-read.table("out_taxa.txt", header=TRUE)
+taxmat<-as.matrix(taxmat)
+
+OTU = otu_table(otumat, taxa_are_rows = TRUE)
+TAX = tax_table(taxmat)
+physeq = phyloseq(OTU, TAX)
+
+
+######Take out sequences that have not been annotated at least to the class level, as well as chloroplasts
+physeq_class <- subset_taxa(physeq, Class != "NA")
+physeq_class2 <- subset_taxa(physeq_class, Class != "Chloroplast")
+
+####Remove ASVs with less than 10 total copies (taking all samples into account)
+physeq_class3 = prune_samples(sample_sums(physeq_class2)>=10, physeq_class2)
+###Save cleaned-up ASV abundance table and associated taxonomy
+OTU = as(otu_table(physeq_class3), "matrix")
+write.table(OTU, "otu_asvs_classlevel.txt")
+TAXA = as(tax_table(physeq_class), "matrix")
+write.table(TAXA, "taxa_asvs_classlevel.txt")
+
+#Translate ASV abundance table:
+asvs<-t(OTU)
+
+asv_table<-matrix(ncol=ncol(asvs),nrow=nrow(asvs))
+asv_table<-as.data.frame(asv_table)
+for (i in 1:ncol(asvs)) {
+  asv_table[,i]<-as.numeric(as.character(asvs[,i]))
+}
+colnames(asv_table)<-colnames(asvs)
+rownames(asv_table)<-rownames(asvs)
+
+####Step 2: Relative abundance table and NMDS analysis using the vegan package
+Relabundances<-matrix(ncol=ncol(asv_table),nrow=nrow(asv_table))
+Relabundances<-as.data.frame(Relabundances)
+for (i in 1:nrow(asv_table)) {
+  somme_ligne=sum(asv_table[i,])
+  for (j in 1:ncol(asv_table)) {
+      Relabundances[i,j]=(asv_table[i,j]/somme_ligne)*100
+   }
+}
+colnames(Relabundances)<-colnames(asv_table)
+rownames(Relabundances)<-rownames(asv_table)
+
+library(vegan)
+set.seed(123)
+nmds = metaMDS(Relabundances, distance = "bray")
+nmds
+data.scores = as.data.frame(scores(nmds))
+write.table(data.scores, "nmds.txt")
+####NMDS data was imported into GraphPad Prism 9 for plotting
+
+####Step 3: Statistical ASV abundance differences between conditions (DESeq2 package in R)
+
+#####Create count matrix called cts
+ cts<-as.matrix(asv_table)
+                            
+####Create a coldata.txt file in NotePad with one column listing the groups (conditions) each sample belongs to.  
+ coldata<-read.table("coldata.txt", header=TRUE, sep="\t")
+
+####Run DESeq2 to find statistical differences between conditions
+library(DESeq2)
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ group)
+                             
+dds <- DESeq(dds)
+resultsNames(dds) # lists the coefficients
+res<-results(dds)                  
+library("apeglm")            
+
+res <- results(dds, name="group_noMPnoAB_vs_noMPAB") ####do as many times as pairwise comparisons you have in your dataset
+sum(res$padj < 0.05, na.rm=TRUE)
+resOrdered <- res[order(res$padj),]
+write.table(resOrdered, "noMPnoAB_vs_noMPAB.txt")
+
+####Results are manually curated (removal of results with a log2FoldChange < 2, taxonomic annotation at the genus level for each ASV) and imported into GraphPad Prism 9

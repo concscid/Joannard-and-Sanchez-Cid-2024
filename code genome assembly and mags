@@ -1,0 +1,129 @@
+######METAGENOMIC SEQUENCING: SHORT-READ OR HYBRID ASSEMBLY, MAPPING AND MAG RECONSTRUCTION USING ANVI'O#####
+######Code used in Joannard and Sanchez-Cid, 2024#####
+###The workflow and code used, except blasts against specific databases, are all part of anvi'o (see the official website for more information): https://anvio.org/ 
+
+
+###Before starting: put fastq pair-end read files in a folder named 00_RAW and a create a .txt file that contains sample names in the first column, the pathway to R1 files in the second column and the pathway to R2 files in the third column.
+
+source activate anvio_env
+
+###Step 1: quality control of short-reads using the criteria described by Minoche et al.
+
+mkdir 01_QC
+iu-gen-configs samples.txt -o 01_QC
+ls 01_QC/
+Sample_01.ini
+Sample_02.ini
+
+for ini in 01_QC/*.ini; do iu-filter-quality-minoche $ini; done
+
+
+###Step 2A (ONLY FOR SHORT READ ASSEMBLY): metagenomic short-read assembly using MEGAHIT
+
+cd 01_QC
+
+cat *R1.fastq > R1.fastq
+cat *R2.fastq > R2.fastq
+gzip R*.fastq
+
+megahit -1 R1.fastq.gz -2 R2.fastq.gz --min-contig-len 1000 -o /megahit -t 16 --k-list 21,41,61,81,99
+
+
+
+######STEP 2 (ONLY FOR HYBRID ASSEMBLY): hybrid assembly of short and long reads using Unicycler
+unicycler -1 R1.fastq.gz -2 R2.fastq.gz -l nanopore.fastq.gz -o /unicycler
+
+
+####Step 3: mapping of short reads onto contigs using Bowtie2
+
+NUM_THREADS=4
+
+##Name of the samples
+names='noMPnoAB1 noMPnoAB2 noMPnoAB3 noMPAB1 noMPAB2 noMPAB3 MPnoAB1 MPnoAB2 MPnoAB3 MPAB1 MPAB2 MPAB3' 
+
+mkdir 04_MAPPING
+
+bowtie2-build megahit/final.contigs.fa 04_MAPPING/contigs ###unicycler/contigs.fa if hybrid assembly
+
+for sample in $names
+do
+bowtie2 --threads $NUM_THREADS -x 04_MAPPING/contigs -1 /01_QC/${sample}-QUALITY_PASSED_R1.fastq -2 /01_QC/${sample}-QUALITY_PASSED_R2.fastq --no-unal -S 04_MAPPING/$sample.sam
+samtools view -F 4 -bS 04_MAPPING/$sample.sam > 04_MAPPING/$sample-RAW.bam
+anvi-init-bam 04_MAPPING/$sample-RAW.bam -o 04_MAPPING/$sample.bam
+rm 04_MAPPING/$sample.sam 04_MAPPING/$sample-RAW.bam
+done
+
+###Step 4: create a contig database from the contig file
+
+anvi-gen-contigs-database -f final.contigs.fa -o contigs.db -n 'MPs_metagenomes'
+
+#####Hidden Markov models: utilize multiple default bacterial single-copy core gene collections and identify hits among your genes to those collections using HMMER
+
+anvi-run-hmms -c contigs.db --num-threads 4
+
+####Annotate genes in your contigs database with functions from the NCBI’s Clusters of Orthologus Groups, EBI's pfam database and (previously downloaded)
+#anvi-setup-ncbi-cogs --cog-version COG20 --cog-data-dir COG_2020 -T 
+#anvi-setup-pfams --pfam-version 32.0 --pfam-data-dir Pfam_v32
+
+anvi-run-ncbi-cogs -c contigs.db --cog-data-dir COG_2020 --num-threads 4
+anvi-run-pfams -c contigs-db --pfam-data-dir Pfam_v32
+
+####Taxonomic annotation of the contigs
+
+anvi-run-scg-taxonomy -c contigs.db
+
+
+####Step 5: Create individual profiles for each sample
+names='noMPnoAB1 noMPnoAB2 noMPnoAB3 noMPAB1 noMPAB2 noMPAB3 MPnoAB1 MPnoAB2 MPnoAB3 MPAB1 MPAB2 MPAB3' 
+
+mkdir 05_PROFILES
+
+for sample in $names ; do anvi-profile -c contigs.db -i 04_MAPPING/$sample.bam --sample-name $sample --min-contig-length 1000 --output-dir 05_PROFILES/$sample ; done 
+
+###Step 6: Merge profiles
+mv contigs.db 05_PROFILES
+cd 05_PROFILES
+anvi-merge */PROFILE.db -o SAMPLES-MERGED -c contigs.db --enforce-hierarchical-clustering
+
+####Visualization of all the generated data using the anvi'o interactive platform
+anvi-interactive -p PROFILE.db -c contigs.db
+
+###Step 7: Binning, MAG reconstruction and refinement. Binning is done manually based on differential. Bins are stored manually using the anvi'o interactive platform (for more information refer to the anvi'o website)
+###Bin refinement on the interactive platform to satisfy quality criteria (completion >50% redundancy <10%) (-C name of the bin collection, -b name of the bin):
+anvi-refine -p PROFILE.db -c contigs.db -C bins -b Bin_1
+###Refined bins are stored manually based on differential coverage and sequence composition using the interactive platform and summarized using:
+anvi-summarize -c contigs.db -p PROFILE.db -C bins
+
+source deactivate anvio_env
+
+##The summary generated contains all the relevant information (MAG abundance, completion, redundancy, functional traits annotated with COG and pfam...) that was used in this study. Plots and statistical analyses were obtained using GraphPad Prism 9
+
+####Step 7: Annotation of genes of interest in the MAGs: 
+
+#### 7.1 Diamond blast against specific databases (CARD for antibiotic resistance genes, BV-BRC for virulence factors, Microplastic Degradation DB)
+###Example for Acinetobacter MAG and the CARD database, the same was done for all bins and databases, previously downloaded into the folder (databases created using diamond makedb)###
+
+###Blast the contig sequences against the database and filter based on aminoacid identity (>60%) and alignment length (>100 aa) - choose best-hit
+
+diamond blastx --db /databases/card.dmnd --query Acinetobacter-contigs.fa --evalue 0.00001 --out /metaplasmidspades/card_contigsAcinetobacter.txt -p 16 
+awk '$3>=60 && $4>=100 {print;} card_contigsAcinetobacter.txt > filtered_cardAcinetobacter.txt
+awk '!x[$1]++' filtered_cardAcinetobacter.txt > besthit_cardAcinetobacter.txt
+
+### 7.2 Diamond blast against the nr database and subsequent SEED hierarchical system analysis using MEGAN6 (example with Acinetobacter)
+diamond blastx --db nr.dmnd --query Acinetobacter-contigs.fa --max-target-seqs 1 --evalue 0.00001 --id 60 --query-cover 70 --daa $file.out --threads 32 
+
+### .daa files are "meganized" and analyzed using MEGAN6 to find type IV secretion syste genes
+
+
+####Step 8: PlasX machine-learning classification of chromosomal and plasmid reads (for more info https://github.com/michaelkyu/plasx)
+source activate anvio_env
+anvi-export-gene-calls --gene-caller prodigal -c contigs.db -o contigs-gene-calls.txt
+anvi-export-functions --annotation-sources COG20_FUNCTION,Pfam -c contigs.db -o contigs-cogs-and-pfams.txt
+source deactivate anvio_env
+
+source activate plasx
+plasx search_de_novo_families  -g contigs-gene-calls.txt -o contigs-de-novo-families.txt --threads 16 --splits 32
+plasx predict -a contigs-cogs-and-pfams.txt contigs-de-novo-families.txt -g contigs-gene-calls.txt -o contigs-scores.txt --overwrite
+source deactivate plasx
+###ARG-containing contigs are manually looked for in the output from PlasX to determine whether they're plasmid-like or chromosomal-like sequences based on the score provide by PlasX. This score ranges from 0 (likely not plasmid) to 1 (likely plasmid). We set up a cut-off of 0.6 for plasmid sequences.
+

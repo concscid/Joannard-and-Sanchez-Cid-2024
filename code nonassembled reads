@@ -1,0 +1,96 @@
+######METAGENOMIC AND CLASS 1 INTEGRON (CLINICAL AND ENVIRONMENTAL) SEQUENCING: ANTIBIOTIC RESISTOME ANALYSIS ON NON-ASSEMBLED READS #####
+######Code used in Joannard and Sanchez-Cid, 2024#####
+
+###Before starting: put fastq pair-end read files in a folder named 00_RAW and a create a .txt file that contains sample names in the first column, the pathway to R1 files in the second column and the pathway to R2 files in the third column.
+
+source activate anvio_env
+
+###Step 1: quality control of short-reads using the criteria described by Minoche et al.
+
+mkdir 01_QC
+iu-gen-configs samples.txt -o 01_QC
+ls 01_QC/
+Sample_01.ini
+Sample_02.ini
+
+for ini in 01_QC/*.ini; do iu-filter-quality-minoche $ini; done
+
+source deactivate anvio_env
+
+####Step 2: conversion to fasta
+cd 01_QC
+for function in *.fastq; do
+fastx_toolkit/fastq_to_fasta -i $function -o $function.fasta -Q33
+done
+mkdir Fasta_File
+mv *.fasta Fasta_File
+
+###Step 3: concatenation of forward and reverse reads (without merging)
+cd Fasta_File
+ls *.fasta > sample_list.txt
+
+while read ligne
+do
+	sed 's/\(.*\)\(_R\).*/\1/' > liste_names.txt
+done < sample_list.txt
+
+nl liste_names.txt | sort --key 2 --unique | cut --fields 2 > liste_unique_names.txt
+
+while read name
+do
+	cat $name'_R1'.fastq.fasta  $name'_R2'.fastq.fasta > ./$name'concatenated'.fasta
+done < liste_noms_uniques.txt
+
+mkdir concatenated
+mv concatenated* concatenated
+
+####Step 4: blast against the CARD database
+for file in *.fasta
+do
+diamond blastx --db /databases/card.dmnd --query $file --evalue 0.00001 --out /metaplasmidspades/card_$file -p 16 
+done
+
+mkdir card_results
+mv card* card_results
+cd card_results
+
+for file in *.fasta
+do
+awk '$3>=60 && $4>=100 {print;} $file > filtered_$file
+done
+
+mkdir filtered
+mv filtered* filtered
+cd filtered
+
+for file in *.fasta
+do
+awk '!x[$1]++' $file > besthit_$file
+
+####Step 5: abundance analysis using R
+
+###Input: blast results (filtered) in .tsv format (one file per sample). Two columns: gene (gene names and accession numbers) and count (number of hits) Edit on excel as the example:
+###"gene"	"count"
+###"1"	"gb|AAA25550.1|ARO:3003105|dfrA3"	1
+###"2"	"gb|AAA26793|ARO:3003748|oleC"	1
+
+library(dplyr)
+library(tidyverse)
+
+###Create tables with unique gene columns per sample (do it individually for each sample):
+setwd("CARD")
+arg<-read.table(file ="noMPAB1.txt", header = TRUE, sep = "\t")
+arg2 <- arg %>% group_by(gene)
+arg3 <- arg2 %>% summarise(n = n())
+colnames(arg3)<-colnames(arg)
+write.table(arg3, "noMPAB2.tsv", sep ="\t")
+
+setwd("../")
+filenames<- list.files("CARD", pattern = "*.tsv", full.names=TRUE)
+ldf<-lapply(filenames, read.delim, fill=TRUE, header=TRUE)
+names(ldf)=str_remove(filenames,"^.*/")
+ldf2<-imap_dfr(ldf, ~cbind(.x,sample=.y))
+tab2<-pivot_wider(ldf2, names_from=sample, values_from=count, values_fill=0)
+write.table(tab2, "arg_counts.txt")
+
+###Gene counts are normalized per sequencing depth and plotted using GraphPad 9
