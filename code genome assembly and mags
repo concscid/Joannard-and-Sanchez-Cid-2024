@@ -30,8 +30,11 @@ megahit -1 R1.fastq.gz -2 R2.fastq.gz --min-contig-len 1000 -o /megahit -t 16 --
 
 
 
-######STEP 2 (ONLY FOR HYBRID ASSEMBLY): hybrid assembly of short and long reads using Unicycler
+######STEP 2B (ONLY FOR HYBRID ASSEMBLY USING UNICYCLER): hybrid assembly of short and long reads using Unicycler
 unicycler -1 R1.fastq.gz -2 R2.fastq.gz -l nanopore.fastq.gz -o /unicycler
+
+#####STEP 2C (ONLY FOR HYBRID ASSEMBLY USING OPERA-MS): hybrid assembly of short and long reads using OPERA-MS
+perl OPERA-MS.pl --short-read1 R1.fastq --short-read2 R2.fastq --long-read NP.fastq --out-dir /operams --contig-len-thr 1000 --no-ref-clustering
 
 
 ####Step 3: mapping of short reads onto contigs using Bowtie2
