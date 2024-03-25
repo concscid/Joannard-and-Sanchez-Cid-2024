@@ -1,0 +1,57 @@
+#####ASSEMBLY OF VIRAL CONTIGS USING METAVIRALSPADES#######
+
+###Step 1: assembly of viral contigs using MetaviralSPAdes
+source activate spades
+/SPAdes-3.15.5-Linux/bin/metaviralspades.py -1 R1.fastq -2 R2.fastq -o /metaviralspades
+source deactivate spades
+
+####Step 2: identify ARG-carrying viral contigs
+
+diamond blastx --db /databases/card.dmnd --query contigs.fasta --out /card/card_contigs.txt -p 16
+cd card
+awk '$3>=60 && $4>=150 {print;}' card_contigs.txt > filtered_card.txt 
+
+####Step 3: mapping of short reads onto contigs using Bowtie2
+
+NUM_THREADS=4
+
+##Name of the samples
+names='noMPnoAB1 noMPnoAB2 noMPnoAB3 noMPAB1 noMPAB2 noMPAB3 MPnoAB1 MPnoAB2 MPnoAB3 MPAB1 MPAB2 MPAB3' 
+
+mkdir 04_MAPPING
+
+bowtie2-build metaviralspades/contigs.fasta 04_MAPPING/contigs
+
+for sample in $names
+do
+bowtie2 --threads $NUM_THREADS -x 04_MAPPING/contigs -1 /01_QC/${sample}-QUALITY_PASSED_R1.fastq -2 /01_QC/${sample}-QUALITY_PASSED_R2.fastq --no-unal -S 04_MAPPING/$sample.sam
+samtools view -F 4 -bS 04_MAPPING/$sample.sam > 04_MAPPING/$sample-RAW.bam
+anvi-init-bam 04_MAPPING/$sample-RAW.bam -o 04_MAPPING/$sample.bam
+rm 04_MAPPING/$sample.sam 04_MAPPING/$sample-RAW.bam
+done
+
+###Step 4: viral contig annotation (online using PhageScope: https://phagescope.deepomics.org/analysis/annopipline/)
+
+###Step 5: blast of MAGs against an ARG-containing contig database (using contig files from each MAGs)
+
+makeblastdb -in /databases/argcontigs.fasta -input_type fasta -dbtype nucl -title viralcontigs  -out /databases
+
+for file in *.fa; do
+blastn -task megablast -query $file -db /databases/viralcontigs -outfmt '6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore salltitles' -out blast/blast_$file -num_threads 16
+done
+cd card
+awk '$3>=99 && $4>=1000 {print;}' card_contigs.txt > filtered_card.txt 
+
+
+######ASSEMBLY OF PLASMID CONTIGS USING METAPLASMIDSPADES#####
+
+###Step 1: assembly of viral contigs using MetaplasmidSPAdes
+source activate spades
+/SPAdes-3.15.5-Linux/bin/metaplasmidspades.py -1 R1.fastq -2 R2.fastq -o /metaplasmidspades
+source deactivate spades
+
+####Step 2: identify ARG-carrying plasmid contigs
+
+diamond blastx --db /databases/card.dmnd --query contigs.fasta --out /card/card_contigs.txt -p 16
+cd card
+awk '$3>=60 && $4>=150 {print;}' card_contigs.txt > filtered_card.txt 
