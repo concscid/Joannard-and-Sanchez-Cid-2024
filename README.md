@@ -7,4 +7,4 @@ This repertory contains 4 files:
 3. Code used for antibiotic resistance gene screening in non-assembled Illumina reads (metagenomics and class 1 integrons)
 4. Code used for mobilome assembly and annotation (plasmid and viral contigs)
 
-Raw sequences are available at: 
+Raw sequences are available at the DDBJ repository, BioProject PRJDB17794
