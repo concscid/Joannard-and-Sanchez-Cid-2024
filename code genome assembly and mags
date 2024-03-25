@@ -108,7 +108,7 @@ source deactivate anvio_env
 
 ###Blast the contig sequences against the database and filter based on aminoacid identity (>60%) and alignment length (>100 aa) - choose best-hit
 
-diamond blastx --db /databases/card.dmnd --query Acinetobacter-contigs.fa --evalue 0.00001 --out /metaplasmidspades/card_contigsAcinetobacter.txt -p 16 
+diamond blastx --db /databases/card.dmnd --query Acinetobacter-contigs.fa --evalue 0.00001 --out /card/card_contigsAcinetobacter.txt -p 16 
 awk '$3>=60 && $4>=100 {print;} card_contigsAcinetobacter.txt > filtered_cardAcinetobacter.txt
 awk '!x[$1]++' filtered_cardAcinetobacter.txt > besthit_cardAcinetobacter.txt
 
